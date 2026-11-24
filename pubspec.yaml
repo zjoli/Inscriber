@@ -1,0 +1,27 @@
+name: inscriber
+description: 跨平台透明悬浮提词器（支持固定速率歌词式3行滚动，预留AI语音智能滚动扩展）
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  shared_preferences: ^2.3.2
+  speech_to_text: ^7.5.0
+  pinyin: ^3.3.0
+  sherpa_onnx: ^2.0.3
+  record: ^7.2.0
+  path_provider: ^2.1.6
+  http: ^1.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
