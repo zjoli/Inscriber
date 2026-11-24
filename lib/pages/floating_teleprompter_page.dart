@@ -5,6 +5,7 @@ import 'package:flutter/scheduler.dart';
 import '../engine/line_splitter.dart';
 import '../engine/scroll_driver.dart';
 import '../models/teleprompter_script.dart';
+import '../services/background_overlay_voice_controller.dart';
 import '../services/overlay_channel.dart';
 import '../services/voice_recognizer.dart';
 import '../services/voice_recognizer_factory.dart';
@@ -244,13 +245,39 @@ class _FloatingTeleprompterPageState extends State<FloatingTeleprompterPage>
   }
 
   Future<void> _switchToSystemOverlay() async {
+    final currentProgress = _activeDriver.progress;
     await _voiceRecognizer.stopListening();
     _fixedDriver.pause();
     _voiceDriver.pause();
+
+    if (_isAiMode) {
+      if (!mounted) return;
+      final modelReady = await ensureAiVoiceModelReady(context);
+      if (!mounted || !modelReady) return;
+    }
+
     final result = await OverlayChannel.startOverlay(
       script: widget.script.copyWith(settings: _settings),
       lines: _activeDriver.lines,
     );
+    if (!mounted) return;
+
+    if (result.started && _isAiMode) {
+      final voiceOk = await BackgroundOverlayVoiceController.instance.start(
+        lines: _activeDriver.lines,
+        initialLineProgress: currentProgress,
+      );
+      if (!mounted) return;
+      if (!voiceOk) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('悬浮窗已启动，麦克风暂不可用，已自动降级为固定速率。')),
+        );
+        return;
+      }
+    } else if (result.started) {
+      await BackgroundOverlayVoiceController.instance.stop();
+    }
+
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(result.message)),

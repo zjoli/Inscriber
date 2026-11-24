@@ -24,12 +24,17 @@ import kotlin.math.roundToInt
 class LyricTeleprompterOverlayView(context: Context) : View(context) {
 
     private var rawLines: List<String> = listOf("（暂无提词内容）")
+    private var lineCharCounts: IntArray = IntArray(1) { 1 }
+    private var totalReadableChars: Int = 1
 
     var lines: List<String> = listOf("（暂无提词内容）")
         set(value) {
             rawLines = if (value.isEmpty()) listOf("（暂无提词内容）") else value
-            field = wrapLinesToCurrentWidth(rawLines)
+            val wrapped = wrapLinesToCurrentWidth(rawLines)
+            field = wrapped
+            rebuildCharIndex(wrapped)
             progress = progress.coerceIn(0f, maxProgress())
+            externalTargetProgress = externalTargetProgress.coerceIn(0f, maxProgress())
             invalidate()
         }
 
@@ -59,11 +64,23 @@ class LyricTeleprompterOverlayView(context: Context) : View(context) {
     var enableTextShadow: Boolean = true
     var mirrorMode: Boolean = false
 
+    /// 为 true 时由 Flutter 后台 Sherpa-ONNX 经 syncProgress 驱动；为 false 时使用本地固定速率滚动
+    var externalFollowMode: Boolean = false
+        set(value) {
+            field = value
+            if (value) {
+                externalTargetProgress = progress
+            }
+            invalidate()
+        }
+
     var isPlaying: Boolean = true
         private set
 
     var progress: Float = 0f
         private set
+
+    private var externalTargetProgress: Float = 0f
 
     private var lastFrameNanos: Long = 0L
     private var frameLoopRunning = false
@@ -79,7 +96,11 @@ class LyricTeleprompterOverlayView(context: Context) : View(context) {
             if (!frameLoopRunning) return
             if (lastFrameNanos != 0L && isPlaying) {
                 val dtSeconds = (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0f
-                advanceProgress(dtSeconds)
+                if (externalFollowMode) {
+                    advanceExternalDamping(dtSeconds)
+                } else {
+                    advanceProgress(dtSeconds)
+                }
             }
             lastFrameNanos = frameTimeNanos
             invalidate()
@@ -120,8 +141,74 @@ class LyricTeleprompterOverlayView(context: Context) : View(context) {
 
     fun reset() {
         progress = 0f
+        externalTargetProgress = 0f
         isPlaying = true
         invalidate()
+    }
+
+    /// 接收 Flutter 后台 Sherpa-ONNX 推来的实时朗读进度
+    /// 优先用 charRatio（全文可读字比例）映射到当前自动换行后的精确行，避免不同宽度换行导致行号漂移
+    fun syncExternalProgress(lineProgress: Float, charRatio: Float) {
+        val mappedTarget = if (charRatio in 0f..1f && totalReadableChars > 1) {
+            mapCharRatioToLineProgress(charRatio)
+        } else {
+            lineProgress
+        }
+        externalTargetProgress = mappedTarget.coerceIn(0f, maxProgress())
+        if (mappedTarget <= 0.001f) {
+            progress = 0f
+        }
+        invalidate()
+    }
+
+    private fun advanceExternalDamping(dtSeconds: Float) {
+        if (dtSeconds <= 0f) return
+        val diff = externalTargetProgress - progress
+        if (abs(diff) < 0.001f) {
+            progress = externalTargetProgress
+            return
+        }
+        val factor = (dtSeconds * 7.5f).coerceIn(0f, 1f)
+        progress = (progress + diff * factor).coerceIn(0f, maxProgress())
+    }
+
+    private fun rebuildCharIndex(wrapped: List<String>) {
+        val counts = IntArray(wrapped.size)
+        var total = 0
+        for (i in wrapped.indices) {
+            val c = countReadableChars(wrapped[i])
+            counts[i] = c
+            total += c
+        }
+        lineCharCounts = counts
+        totalReadableChars = max(1, total)
+    }
+
+    private fun countReadableChars(text: String): Int {
+        var count = 0
+        for (ch in text) {
+            if (ch.isLetterOrDigit()) count++
+        }
+        return max(1, count)
+    }
+
+    private fun mapCharRatioToLineProgress(charRatio: Float): Float {
+        if (lines.size <= 1) return 0f
+        val clamped = charRatio.coerceIn(0f, 1f)
+        if (clamped >= 0.999f) return maxProgress()
+
+        val targetCharPos = clamped * totalReadableChars
+        var accumulated = 0f
+        for (i in lineCharCounts.indices) {
+            val lineLen = lineCharCounts[i].toFloat()
+            if (accumulated + lineLen >= targetCharPos || i == lineCharCounts.lastIndex) {
+                val frac = ((targetCharPos - accumulated) / max(1f, lineLen)).coerceIn(0f, 1f)
+                val eased = Math.pow(frac.toDouble(), 1.35).toFloat()
+                return (i + eased * 0.92f).coerceIn(0f, maxProgress())
+            }
+            accumulated += lineLen
+        }
+        return maxProgress()
     }
 
     fun adjustSpeed(deltaCpm: Int): Int {

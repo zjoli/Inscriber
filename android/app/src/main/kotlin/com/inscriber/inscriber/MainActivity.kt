@@ -3,6 +3,8 @@ package com.inscriber.inscriber
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -11,15 +13,29 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL_NAME = "com.inscriber/overlay"
+        private val mainHandler = Handler(Looper.getMainLooper())
+
+        @Volatile
+        private var overlayChannel: MethodChannel? = null
+
+        /// 原生悬浮窗反向通知 Flutter（暂停/继续、重头、关闭），确保后台 Sherpa-ONNX 同步启停
+        fun notifyOverlayEvent(method: String, arguments: Any? = null) {
+            mainHandler.post {
+                overlayChannel?.invokeMethod(method, arguments)
+            }
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        MethodChannel(
+        val channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL_NAME
-        ).setMethodCallHandler { call, result ->
+        )
+        overlayChannel = channel
+
+        channel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "hasPermission" -> {
                     result.success(hasOverlayPermission())
@@ -80,12 +96,32 @@ class MainActivity : FlutterActivity() {
                             TeleprompterOverlayService.EXTRA_MIRROR_MODE,
                             call.argument<Boolean>("mirrorMode") ?: false
                         )
+                        putExtra(
+                            TeleprompterOverlayService.EXTRA_AI_VOICE_MODE,
+                            call.argument<Boolean>("aiVoiceMode") ?: false
+                        )
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(intent)
                     } else {
                         startService(intent)
                     }
+                    result.success(true)
+                }
+
+                "syncProgress" -> {
+                    val lineProgress = (call.argument<Number>("progress")?.toFloat()) ?: 0f
+                    val charRatio = (call.argument<Number>("charRatio")?.toFloat()) ?: -1f
+                    TeleprompterOverlayService.activeInstance?.syncExternalProgress(
+                        lineProgress = lineProgress,
+                        charRatio = charRatio
+                    )
+                    result.success(true)
+                }
+
+                "setAiVoiceMode" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    TeleprompterOverlayService.activeInstance?.setAiVoiceMode(enabled)
                     result.success(true)
                 }
 
@@ -126,6 +162,10 @@ class MainActivity : FlutterActivity() {
                             TeleprompterOverlayService.EXTRA_MIRROR_MODE,
                             call.argument<Boolean>("mirrorMode") ?: false
                         )
+                        putExtra(
+                            TeleprompterOverlayService.EXTRA_AI_VOICE_MODE,
+                            call.argument<Boolean>("aiVoiceMode") ?: false
+                        )
                     }
                     startService(intent)
                     result.success(true)
@@ -139,6 +179,11 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onDestroy() {
+        overlayChannel = null
+        super.onDestroy()
     }
 
     private fun hasOverlayPermission(): Boolean {

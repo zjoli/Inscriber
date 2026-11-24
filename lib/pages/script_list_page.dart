@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/teleprompter_script.dart';
+import '../services/background_overlay_voice_controller.dart';
 import '../services/overlay_channel.dart';
 import '../services/script_repository.dart';
 import '../theme/app_theme.dart';
@@ -259,10 +260,11 @@ class _ScriptListPageState extends State<ScriptListPage> {
               child: InkWell(
                 borderRadius: BorderRadius.circular(999),
                 onTap: () async {
+                  await BackgroundOverlayVoiceController.instance.stop();
                   await OverlayChannel.stopOverlay();
                   if (!context.mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('已发送关闭系统悬浮窗指令')),
+                    const SnackBar(content: Text('已关闭系统悬浮窗并停止后台语音跟读')),
                   );
                 },
                 child: Container(

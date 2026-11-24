@@ -4,6 +4,7 @@ import 'package:flutter/scheduler.dart';
 import '../engine/line_splitter.dart';
 import '../engine/scroll_driver.dart';
 import '../models/teleprompter_script.dart';
+import '../services/background_overlay_voice_controller.dart';
 import '../services/offline_model_manager.dart';
 import '../services/overlay_channel.dart';
 import '../services/script_repository.dart';
@@ -279,6 +280,16 @@ class _ScriptSettingsPageState extends State<ScriptSettingsPage>
   Future<void> _launchSystemOverlay() async {
     await _stopAllPreviews();
     final saved = await _saveScript();
+    final isAiVoice = saved.settings.scrollMode == ScrollMode.aiVoice;
+
+    if (isAiVoice) {
+      if (!mounted) return;
+      final modelReady = await ensureAiVoiceModelReady(context);
+      if (!mounted) return;
+      await _refreshOfflineModelStatus();
+      if (!modelReady) return;
+    }
+
     final lines = LyricLineSplitter.split(
       saved.content,
       maxCharsPerLine: saved.settings.maxCharsPerLine,
@@ -289,6 +300,25 @@ class _ScriptSettingsPageState extends State<ScriptSettingsPage>
     );
     if (!mounted) return;
 
+    if (result.started && isAiVoice) {
+      final voiceOk = await BackgroundOverlayVoiceController.instance.start(
+        lines: lines,
+      );
+      if (!mounted) return;
+      if (!voiceOk) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('悬浮窗已启动，但麦克风暂不可用，已自动切换为固定速率滚动。'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        return;
+      }
+    } else if (result.started) {
+      await BackgroundOverlayVoiceController.instance.stop();
+    }
+
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(result.message),

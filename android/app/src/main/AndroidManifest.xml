@@ -4,9 +4,10 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- AI 语音跟随所需的麦克风录音权限 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- 前台服务保活权限，防止切到相机/直播 App 后提词被系统回收 -->
+    <!-- 前台服务保活权限，防止切到相机/直播 App 后提词与后台麦克风被系统回收 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Android 11+ 查询系统语音识别服务必需 -->
@@ -39,11 +40,11 @@
             </intent-filter>
         </activity>
 
-        <!-- 透明 3 行歌词悬浮窗前台服务 -->
+        <!-- 透明 3 行歌词悬浮窗前台服务（支持后台麦克风保活以驱动 Sherpa-ONNX） -->
         <service
             android:name=".TeleprompterOverlayService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|microphone">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Transparent floating teleprompter overlay displaying scrolling lines over other apps" />

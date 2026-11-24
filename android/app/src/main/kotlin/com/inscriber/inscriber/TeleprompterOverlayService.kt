@@ -1,5 +1,6 @@
 package com.inscriber.inscriber
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -26,8 +29,8 @@ import kotlin.math.abs
 /**
  * Android 透明悬浮提词前台服务
  * - 悬浮在任意第三方 App 之上（相机、抖音、微信视频等）
- * - 默认 2.8 秒后隐藏控制条，只保留 3 行歌词式提词，其余区域完全透明
- * - 支持手指拖拽移动悬浮窗位置，轻点唤出微控条（暂停/变速/重置/关闭）
+ * - 支持两种滚动驱动：本地固定速率 / Flutter 后台 Sherpa-ONNX 实时 syncProgress 同步
+ * - 在 Android 14+ 自动声明 specialUse|microphone 前台服务类型，防止切后台后系统静音麦克风
  */
 class TeleprompterOverlayService : Service() {
 
@@ -46,9 +49,14 @@ class TeleprompterOverlayService : Service() {
         const val EXTRA_BG_OPACITY = "backgroundOpacity"
         const val EXTRA_ENABLE_SHADOW = "enableTextShadow"
         const val EXTRA_MIRROR_MODE = "mirrorMode"
+        const val EXTRA_AI_VOICE_MODE = "aiVoiceMode"
 
         private const val NOTIFICATION_CHANNEL_ID = "inscriber_overlay_channel"
         private const val NOTIFICATION_ID = 20261
+
+        @Volatile
+        var activeInstance: TeleprompterOverlayService? = null
+            private set
     }
 
     private lateinit var windowManager: WindowManager
@@ -57,6 +65,8 @@ class TeleprompterOverlayService : Service() {
     private var controlBar: LinearLayout? = null
     private var playPauseBtn: TextView? = null
     private var speedLabel: TextView? = null
+    private var slowerBtn: TextView? = null
+    private var fasterBtn: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
 
     private val handler = Handler(Looper.getMainLooper())
@@ -68,6 +78,7 @@ class TeleprompterOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     }
 
@@ -78,7 +89,8 @@ class TeleprompterOverlayService : Service() {
         }
 
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Inscriber 提词"
-        startForeground(NOTIFICATION_ID, buildNotification(title))
+        val aiVoiceMode = intent?.getBooleanExtra(EXTRA_AI_VOICE_MODE, false) ?: false
+        startForegroundSafely(title, aiVoiceMode)
 
         if (rootContainer == null) {
             createOverlayView()
@@ -86,6 +98,51 @@ class TeleprompterOverlayService : Service() {
 
         intent?.let { applyIntentConfig(it) }
         return START_STICKY
+    }
+
+    private fun startForegroundSafely(title: String, aiVoiceMode: Boolean) {
+        val notification = buildNotification(title, aiVoiceMode)
+        val hasMicPerm = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val fgType = if (aiVoiceMode && hasMicPerm) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            }
+            startForeground(NOTIFICATION_ID, notification, fgType)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (aiVoiceMode && hasMicPerm) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    /// 由 MainActivity.syncProgress 直接在主线程调用，零 Intent 分配开销
+    fun syncExternalProgress(lineProgress: Float, charRatio: Float) {
+        handler.post {
+            lyricView?.syncExternalProgress(lineProgress, charRatio)
+        }
+    }
+
+    /// 切换外部 AI 语音跟读 / 本地固定速率模式（含麦克风被抢占时自动降级回定速）
+    fun setAiVoiceMode(enabled: Boolean) {
+        handler.post {
+            val view = lyricView ?: return@post
+            view.externalFollowMode = enabled
+            updateModeControlLabels(view)
+        }
     }
 
     private fun applyIntentConfig(intent: Intent) {
@@ -119,9 +176,26 @@ class TeleprompterOverlayService : Service() {
         if (intent.hasExtra(EXTRA_MIRROR_MODE)) {
             view.mirrorMode = intent.getBooleanExtra(EXTRA_MIRROR_MODE, false)
         }
-        speedLabel?.text = "${view.charsPerMinute}字/分"
+        if (intent.hasExtra(EXTRA_AI_VOICE_MODE)) {
+            view.externalFollowMode = intent.getBooleanExtra(EXTRA_AI_VOICE_MODE, false)
+        }
+        updateModeControlLabels(view)
         view.invalidate()
         scheduleAutoHideControls()
+    }
+
+    private fun updateModeControlLabels(view: LyricTeleprompterOverlayView) {
+        if (view.externalFollowMode) {
+            speedLabel?.text = "AI语音跟读"
+            speedLabel?.setTextColor(0xFF86EFAC.toInt())
+            slowerBtn?.visibility = View.GONE
+            fasterBtn?.visibility = View.GONE
+        } else {
+            speedLabel?.text = "${view.charsPerMinute}字/分"
+            speedLabel?.setTextColor(0xFF93C5FD.toInt())
+            slowerBtn?.visibility = View.VISIBLE
+            fasterBtn?.visibility = View.VISIBLE
+        }
     }
 
     private fun createOverlayView() {
@@ -147,7 +221,7 @@ class TeleprompterOverlayService : Service() {
             gravity = Gravity.CENTER
             setPadding(dp(10), dp(6), dp(10), dp(6))
             background = GradientDrawable().apply {
-                setColor(0xCC111827.toInt())
+                setColor(0xD820201E.toInt())
                 cornerRadius = dp(20).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
@@ -161,15 +235,17 @@ class TeleprompterOverlayService : Service() {
         val playBtn = createMiniButton("暂停") {
             val playing = teleprompterView.togglePlay()
             playPauseBtn?.text = if (playing) "暂停" else "播放"
+            MainActivity.notifyOverlayEvent("onOverlayPlayStateChanged", playing)
             if (playing) scheduleAutoHideControls() else handler.removeCallbacks(hideControlsRunnable)
         }
         playPauseBtn = playBtn
 
-        val slowerBtn = createMiniButton("-20") {
+        val minusBtn = createMiniButton("-20") {
             val cpm = teleprompterView.adjustSpeed(-20)
             speedLabel?.text = "${cpm}字/分"
             scheduleAutoHideControls()
         }
+        slowerBtn = minusBtn
 
         val speedTv = TextView(this).apply {
             text = "${teleprompterView.charsPerMinute}字/分"
@@ -179,15 +255,17 @@ class TeleprompterOverlayService : Service() {
         }
         speedLabel = speedTv
 
-        val fasterBtn = createMiniButton("+20") {
+        val plusBtn = createMiniButton("+20") {
             val cpm = teleprompterView.adjustSpeed(20)
             speedLabel?.text = "${cpm}字/分"
             scheduleAutoHideControls()
         }
+        fasterBtn = plusBtn
 
         val resetBtn = createMiniButton("重头") {
             teleprompterView.reset()
             playPauseBtn?.text = "暂停"
+            MainActivity.notifyOverlayEvent("onOverlayReset")
             scheduleAutoHideControls()
         }
 
@@ -196,9 +274,9 @@ class TeleprompterOverlayService : Service() {
         }
 
         controls.addView(playBtn)
-        controls.addView(slowerBtn)
+        controls.addView(minusBtn)
         controls.addView(speedTv)
-        controls.addView(fasterBtn)
+        controls.addView(plusBtn)
         controls.addView(resetBtn)
         controls.addView(closeBtn)
 
@@ -222,7 +300,7 @@ class TeleprompterOverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = dp(64) // 默认靠屏幕顶部，靠近前置摄像头
+            y = dp(64)
         }
 
         attachDragAndTapHandler(teleprompterView, params)
@@ -312,7 +390,7 @@ class TeleprompterOverlayService : Service() {
         }
     }
 
-    private fun buildNotification(title: String): Notification {
+    private fun buildNotification(title: String, aiVoiceMode: Boolean): Notification {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
@@ -340,9 +418,15 @@ class TeleprompterOverlayService : Service() {
             Notification.Builder(this)
         }
 
+        val subtitle = if (aiVoiceMode) {
+            "AI 离线语音跟随运行中，轻点悬浮文字可暂停或关闭"
+        } else {
+            "轻点悬浮文字可暂停或调速，点击此处可关闭"
+        }
+
         return builder
             .setContentTitle("正在悬浮提词：$title")
-            .setContentText("轻点悬浮文字可暂停或调速，点击此处可关闭")
+            .setContentText(subtitle)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .addAction(
                 Notification.Action.Builder(
@@ -364,6 +448,7 @@ class TeleprompterOverlayService : Service() {
     }
 
     override fun onDestroy() {
+        activeInstance = null
         handler.removeCallbacks(hideControlsRunnable)
         lyricView?.stopLoop()
         rootContainer?.let {
@@ -375,6 +460,7 @@ class TeleprompterOverlayService : Service() {
         rootContainer = null
         lyricView = null
         controlBar = null
+        MainActivity.notifyOverlayEvent("onOverlayStopped")
         super.onDestroy()
     }
 }

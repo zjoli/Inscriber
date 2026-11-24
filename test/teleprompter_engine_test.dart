@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,10 +7,51 @@ import 'package:inscriber/engine/scroll_driver.dart';
 import 'package:inscriber/engine/voice_alignment_engine.dart';
 import 'package:inscriber/models/teleprompter_script.dart';
 import 'package:inscriber/pages/script_settings_page.dart';
+import 'package:inscriber/services/background_overlay_voice_controller.dart';
 import 'package:inscriber/services/offline_model_manager.dart';
 import 'package:inscriber/services/script_repository.dart';
+import 'package:inscriber/services/voice_recognizer.dart';
 import 'package:inscriber/theme/app_theme.dart';
 import 'package:inscriber/widgets/lyric_teleprompter_view.dart';
+
+class _FakeVoiceRecognizer implements VoiceRecognizer {
+  final StreamController<VoiceRecognitionEvent> controller =
+      StreamController<VoiceRecognitionEvent>.broadcast();
+
+  bool listening = false;
+  bool disposed = false;
+
+  @override
+  Stream<VoiceRecognitionEvent> get events => controller.stream;
+
+  @override
+  VoiceRecognizerState get state =>
+      listening ? VoiceRecognizerState.listening : VoiceRecognizerState.idle;
+
+  @override
+  bool get isListening => listening;
+
+  @override
+  Future<bool> initialize() async => true;
+
+  @override
+  Future<bool> startListening({String localeId = 'zh_CN'}) async {
+    listening = true;
+    return true;
+  }
+
+  @override
+  Future<void> stopListening() async {
+    listening = false;
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposed = true;
+    listening = false;
+    await controller.close();
+  }
+}
 
 void main() {
   group('LyricLineSplitter', () {
@@ -263,5 +305,59 @@ void main() {
         }
       }
     });
+
+    test(
+      'BackgroundOverlayVoiceController pushes syncProgress and falls back on mic error',
+      () async {
+        TestWidgetsFlutterBinding.ensureInitialized();
+        final fakeRecognizer = _FakeVoiceRecognizer();
+        final synced = <({double progress, double charRatio})>[];
+        final aiModeCalls = <bool>[];
+
+        final controller = BackgroundOverlayVoiceController(
+          recognizerFactory: () => fakeRecognizer,
+          progressSender: ({
+            required double lineProgress,
+            required double charRatio,
+            String? recognizedText,
+          }) async {
+            synced.add((progress: lineProgress, charRatio: charRatio));
+          },
+          aiModeSetter: (enabled) async {
+            aiModeCalls.add(enabled);
+          },
+        );
+
+        final ok = await controller.start(lines: sampleLines);
+        expect(ok, isTrue);
+        expect(aiModeCalls.last, isTrue);
+        expect(synced.length, 1); // 初始位置 0.0
+
+        fakeRecognizer.controller.add(
+          const VoiceRecognitionEvent(
+            partialText: '今天给大家演示一款极简悬浮题词气',
+            isFinal: true,
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(synced.length, greaterThanOrEqualTo(2));
+        expect(synced.last.progress, greaterThan(1.4));
+        expect(synced.last.charRatio, greaterThan(0.45));
+
+        // 模拟其他 App 抢占麦克风发生异常，自动降级为固定速率并释放识别器
+        fakeRecognizer.controller.add(
+          const VoiceRecognitionEvent(
+            state: VoiceRecognizerState.error,
+            errorMessage: 'mic preempted',
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(aiModeCalls.last, isFalse);
+        expect(controller.isActive, isFalse);
+        expect(fakeRecognizer.disposed, isTrue);
+      },
+    );
   });
 }

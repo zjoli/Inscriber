@@ -21,16 +21,25 @@ final class PiPTeleprompterManager: NSObject,
 
     private var rawLines: [String] = ["（暂无提词内容）"]
     private var lines: [String] = ["（暂无提词内容）"]
+    private var lineCharCounts: [Int] = [1]
+    private var totalReadableChars: Int = 1
+
     private var charsPerMinute: Int = 180
     private var fontSize: CGFloat = 22
     private var visibleLines: Int = 3
     private var activeColor: UIColor = .white
     private var inactiveColor: UIColor = UIColor(white: 0.85, alpha: 0.65)
     private var mirrorMode: Bool = false
+    private var externalFollowMode: Bool = false
 
     private var progress: Double = 0.0
+    private var externalTargetProgress: Double = 0.0
     private var isPlaying: Bool = true
     private var lastTimestamp: CFTimeInterval = 0
+
+    /// 反向通知 Flutter 后台 Sherpa-ONNX 同步启停
+    var onOverlayStopped: (() -> Void)?
+    var onPlayStateChanged: ((Bool) -> Void)?
 
     // PiP 视频帧分辨率（16:7 宽扁比例，适合贴近手机顶部摄像头展示 3 行文字）
     private let frameWidth = 640
@@ -48,7 +57,8 @@ final class PiPTeleprompterManager: NSObject,
         visibleLines: Int,
         activeColorHex: UInt32,
         inactiveColorHex: UInt32,
-        mirrorMode: Bool
+        mirrorMode: Bool,
+        aiVoiceMode: Bool
     ) -> Bool {
         guard isSupported else { return false }
 
@@ -59,12 +69,15 @@ final class PiPTeleprompterManager: NSObject,
         self.activeColor = Self.color(fromARGB: activeColorHex)
         self.inactiveColor = Self.color(fromARGB: inactiveColorHex)
         self.mirrorMode = mirrorMode
+        self.externalFollowMode = aiVoiceMode
         self.lines = rewrapLinesForFrame(self.rawLines)
+        rebuildCharIndex(self.lines)
         self.progress = 0.0
+        self.externalTargetProgress = 0.0
         self.isPlaying = true
         self.lastTimestamp = 0
 
-        configureAudioSession()
+        configureAudioSession(aiVoiceMode: aiVoiceMode)
         setupDisplayLayerIfNeeded(in: parentView)
         startRenderLoop()
 
@@ -84,7 +97,8 @@ final class PiPTeleprompterManager: NSObject,
         visibleLines: Int,
         activeColorHex: UInt32,
         inactiveColorHex: UInt32,
-        mirrorMode: Bool
+        mirrorMode: Bool,
+        aiVoiceMode: Bool? = nil
     ) {
         self.charsPerMinute = max(60, min(480, charsPerMinute))
         self.fontSize = max(14, min(40, fontSize))
@@ -92,7 +106,69 @@ final class PiPTeleprompterManager: NSObject,
         self.activeColor = Self.color(fromARGB: activeColorHex)
         self.inactiveColor = Self.color(fromARGB: inactiveColorHex)
         self.mirrorMode = mirrorMode
+        if let ai = aiVoiceMode {
+            self.externalFollowMode = ai
+        }
         self.lines = rewrapLinesForFrame(self.rawLines)
+        rebuildCharIndex(self.lines)
+    }
+
+    func setAiVoiceMode(_ enabled: Bool) {
+        externalFollowMode = enabled
+        if enabled {
+            externalTargetProgress = progress
+        }
+    }
+
+    /// 接收 Flutter 后台 Sherpa-ONNX 推来的实时朗读进度
+    func syncExternalProgress(lineProgress: Double, charRatio: Double) {
+        let target: Double
+        if charRatio >= 0.0 && charRatio <= 1.0 && totalReadableChars > 1 {
+            target = mapCharRatioToLineProgress(charRatio)
+        } else {
+            target = lineProgress
+        }
+        externalTargetProgress = max(0.0, min(maxProgress(), target))
+        if target <= 0.001 {
+            progress = 0.0
+        }
+    }
+
+    private func rebuildCharIndex(_ wrapped: [String]) {
+        var counts: [Int] = []
+        var total = 0
+        for line in wrapped {
+            var c = 0
+            for scalar in line.unicodeScalars {
+                if CharacterSet.alphanumerics.contains(scalar) || scalar.value > 0x007F {
+                    c += 1
+                }
+            }
+            let safe = max(1, c)
+            counts.append(safe)
+            total += safe
+        }
+        lineCharCounts = counts
+        totalReadableChars = max(1, total)
+    }
+
+    private func mapCharRatioToLineProgress(_ charRatio: Double) -> Double {
+        if lines.count <= 1 { return 0.0 }
+        let clamped = max(0.0, min(1.0, charRatio))
+        if clamped >= 0.999 { return maxProgress() }
+
+        let targetPos = clamped * Double(totalReadableChars)
+        var accumulated = 0.0
+        for i in 0..<lineCharCounts.count {
+            let lineLen = Double(lineCharCounts[i])
+            if accumulated + lineLen >= targetPos || i == lineCharCounts.count - 1 {
+                let frac = max(0.0, min(1.0, (targetPos - accumulated) / max(1.0, lineLen)))
+                let eased = pow(frac, 1.35)
+                return max(0.0, min(maxProgress(), Double(i) + eased * 0.92))
+            }
+            accumulated += lineLen
+        }
+        return maxProgress()
     }
 
     /// 按画中画实际宽度自动换行，避免任何文字被截断为“...”
@@ -127,6 +203,7 @@ final class PiPTeleprompterManager: NSObject,
     }
 
     func stop() {
+        let wasActive = pipController != nil || displayLink != nil
         displayLink?.invalidate()
         displayLink = nil
         if let controller = pipController, controller.isPictureInPictureActive {
@@ -137,11 +214,23 @@ final class PiPTeleprompterManager: NSObject,
         hostContainerView = nil
         displayLayer = nil
         pipController = nil
+        if wasActive {
+            onOverlayStopped?()
+        }
     }
 
-    private func configureAudioSession() {
+    private func configureAudioSession(aiVoiceMode: Bool) {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        if aiVoiceMode {
+            // 同时允许后台 PiP 播放与麦克风采集以支撑 Sherpa-ONNX
+            try? session.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth]
+            )
+        } else {
+            try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        }
         try? session.setActive(true)
     }
 
@@ -182,7 +271,17 @@ final class PiPTeleprompterManager: NSObject,
     @objc private func onDisplayLink(_ link: CADisplayLink) {
         if lastTimestamp > 0 && isPlaying {
             let dt = link.timestamp - lastTimestamp
-            advanceProgress(dt: dt)
+            if externalFollowMode {
+                let diff = externalTargetProgress - progress
+                if abs(diff) < 0.001 {
+                    progress = externalTargetProgress
+                } else {
+                    let factor = min(1.0, max(0.0, dt * 7.5))
+                    progress = max(0.0, min(maxProgress(), progress + diff * factor))
+                }
+            } else {
+                advanceProgress(dt: dt)
+            }
         }
         lastTimestamp = link.timestamp
         renderAndEnqueueCurrentFrame()
@@ -389,8 +488,10 @@ final class PiPTeleprompterManager: NSObject,
     ) {
         if playing && progress >= maxProgress() {
             progress = 0
+            externalTargetProgress = 0
         }
         isPlaying = playing
+        onPlayStateChanged?(playing)
         pictureInPictureController.invalidatePlaybackState()
     }
 

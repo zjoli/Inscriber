@@ -18,6 +18,19 @@ import UIKit
                 binaryMessenger: controller.binaryMessenger
             )
 
+            if #available(iOS 15.0, *) {
+                PiPTeleprompterManager.shared.onOverlayStopped = {
+                    DispatchQueue.main.async {
+                        channel.invokeMethod("onOverlayStopped", arguments: nil)
+                    }
+                }
+                PiPTeleprompterManager.shared.onPlayStateChanged = { playing in
+                    DispatchQueue.main.async {
+                        channel.invokeMethod("onOverlayPlayStateChanged", arguments: playing)
+                    }
+                }
+            }
+
             channel.setMethodCallHandler { [weak controller] call, result in
                 guard #available(iOS 15.0, *) else {
                     result(FlutterError(
@@ -48,6 +61,7 @@ import UIKit
                     let activeColor = (args["activeTextColor"] as? NSNumber)?.uint32Value ?? 0xFFFFFFFF
                     let inactiveColor = (args["inactiveTextColor"] as? NSNumber)?.uint32Value ?? 0xB3E2E8F0
                     let mirrorMode = args["mirrorMode"] as? Bool ?? false
+                    let aiVoiceMode = args["aiVoiceMode"] as? Bool ?? false
 
                     let started = PiPTeleprompterManager.shared.start(
                         in: parentView,
@@ -57,9 +71,28 @@ import UIKit
                         visibleLines: visibleLines,
                         activeColorHex: activeColor,
                         inactiveColorHex: inactiveColor,
-                        mirrorMode: mirrorMode
+                        mirrorMode: mirrorMode,
+                        aiVoiceMode: aiVoiceMode
                     )
                     result(started)
+
+                case "syncProgress":
+                    guard let args = call.arguments as? [String: Any] else {
+                        result(false)
+                        return
+                    }
+                    let progress = (args["progress"] as? NSNumber)?.doubleValue ?? 0.0
+                    let charRatio = (args["charRatio"] as? NSNumber)?.doubleValue ?? -1.0
+                    PiPTeleprompterManager.shared.syncExternalProgress(
+                        lineProgress: progress,
+                        charRatio: charRatio
+                    )
+                    result(true)
+
+                case "setAiVoiceMode":
+                    let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
+                    PiPTeleprompterManager.shared.setAiVoiceMode(enabled)
+                    result(true)
 
                 case "updateSettings":
                     guard let args = call.arguments as? [String: Any] else {
@@ -72,7 +105,8 @@ import UIKit
                         visibleLines: args["visibleLines"] as? Int ?? 3,
                         activeColorHex: (args["activeTextColor"] as? NSNumber)?.uint32Value ?? 0xFFFFFFFF,
                         inactiveColorHex: (args["inactiveTextColor"] as? NSNumber)?.uint32Value ?? 0xB3E2E8F0,
-                        mirrorMode: args["mirrorMode"] as? Bool ?? false
+                        mirrorMode: args["mirrorMode"] as? Bool ?? false,
+                        aiVoiceMode: args["aiVoiceMode"] as? Bool
                     )
                     result(true)
 

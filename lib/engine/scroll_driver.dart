@@ -202,6 +202,7 @@ class AiVoiceScrollDriver extends ScrollDriver {
         matched: false,
         tokenIndex: _alignmentEngine.cursorTokenIndex,
         lineProgress: _targetProgress,
+        charRatio: _alignmentEngine.currentCharRatio,
         confidence: 0.0,
       );
     }

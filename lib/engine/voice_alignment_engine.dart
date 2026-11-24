@@ -26,6 +26,7 @@ class AlignmentMatchResult {
     required this.matched,
     required this.tokenIndex,
     required this.lineProgress,
+    required this.charRatio,
     required this.confidence,
     this.matchedLineSnippet = '',
   });
@@ -33,6 +34,9 @@ class AlignmentMatchResult {
   final bool matched;
   final int tokenIndex;
   final double lineProgress;
+
+  /// 当前匹配字在全文可读字中的归一化位置 [0.0, 1.0]，用于跨端不同换行宽度精确同步
+  final double charRatio;
   final double confidence;
   final String matchedLineSnippet;
 }
@@ -56,6 +60,11 @@ class VoiceAlignmentEngine {
 
   int get cursorTokenIndex => _cursorTokenIndex;
   int get totalTokens => _tokens.length;
+
+  /// 当前指针在全文可读字符中的进度比例 [0.0, 1.0]
+  double get currentCharRatio => _tokens.length <= 1
+      ? 0.0
+      : (_cursorTokenIndex / (_tokens.length - 1)).clamp(0.0, 1.0);
 
   /// 当提词文本或因字号/屏幕宽度变化导致重新自动换行时，重建索引并尽量保留当前进度
   void updateLines(List<String> newLines) {
@@ -133,6 +142,7 @@ class VoiceAlignmentEngine {
         matched: false,
         tokenIndex: 0,
         lineProgress: 0.0,
+        charRatio: 0.0,
         confidence: 0.0,
       );
     }
@@ -143,6 +153,7 @@ class VoiceAlignmentEngine {
         matched: false,
         tokenIndex: _cursorTokenIndex,
         lineProgress: _tokenIndexToLineProgress(_cursorTokenIndex),
+        charRatio: currentCharRatio,
         confidence: 0.0,
       );
     }
@@ -164,6 +175,7 @@ class VoiceAlignmentEngine {
         matched: false,
         tokenIndex: _cursorTokenIndex,
         lineProgress: _tokenIndexToLineProgress(_cursorTokenIndex),
+        charRatio: currentCharRatio,
         confidence: 0.0,
       );
     }
@@ -180,6 +192,7 @@ class VoiceAlignmentEngine {
             matched: true,
             tokenIndex: _cursorTokenIndex,
             lineProgress: _tokenIndexToLineProgress(_cursorTokenIndex),
+            charRatio: currentCharRatio,
             confidence: 0.85,
             matchedLineSnippet: _lines[_tokens[_cursorTokenIndex].lineIndex],
           );
@@ -189,6 +202,7 @@ class VoiceAlignmentEngine {
         matched: false,
         tokenIndex: _cursorTokenIndex,
         lineProgress: _tokenIndexToLineProgress(_cursorTokenIndex),
+        charRatio: currentCharRatio,
         confidence: 0.0,
       );
     }
@@ -256,6 +270,7 @@ class VoiceAlignmentEngine {
         matched: true,
         tokenIndex: _cursorTokenIndex,
         lineProgress: _tokenIndexToLineProgress(_cursorTokenIndex),
+        charRatio: currentCharRatio,
         confidence: confidence,
         matchedLineSnippet: _lines[_tokens[_cursorTokenIndex].lineIndex],
       );
@@ -265,6 +280,7 @@ class VoiceAlignmentEngine {
       matched: false,
       tokenIndex: _cursorTokenIndex,
       lineProgress: _tokenIndexToLineProgress(_cursorTokenIndex),
+      charRatio: currentCharRatio,
       confidence: confidence,
     );
   }
